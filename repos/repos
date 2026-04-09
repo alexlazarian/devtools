@@ -203,17 +203,35 @@ cmd_list() {
 
 cmd_live() {
   local interval="${1:-3}"
+  local prev_line_count=0
 
   trap 'printf "\033[?1049l"; tput cnorm; exit 0' INT TERM
   tput civis  # hide cursor
   printf '\033[?1049h'  # switch to alternate screen buffer
 
   while true; do
-    # Clear entire screen and redraw from top
+    local output
+    output="$(printf "  \033[90m● live  refreshing every %ss  (Ctrl+C to exit)\033[0m\n" "$interval"
+    cmd_status)"
+
+    # Move to top-left, overwrite content in place
     tput home
-    tput ed
-    printf "  \033[90m● live  refreshing every %ss  (Ctrl+C to exit)\033[0m\n" "$interval"
-    cmd_status
+    local line_count=0
+    while IFS= read -r line; do
+      printf '%s' "$line"
+      tput el  # clear rest of this line (handles shrinking content)
+      printf '\n'
+      line_count=$((line_count + 1))
+    done <<< "$output"
+
+    # Clear any leftover lines from previous render
+    while [ "$line_count" -lt "$prev_line_count" ]; do
+      tput el
+      printf '\n'
+      line_count=$((line_count + 1))
+    done
+    prev_line_count=$line_count
+
     sleep "$interval"
   done
 }
