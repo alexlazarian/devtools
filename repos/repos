@@ -1,0 +1,277 @@
+#!/usr/bin/env bash
+# repos - pinned repository status dashboard
+# https://github.com/alexlazarian/devtools/tree/main/repos
+
+set -euo pipefail
+
+VERSION="1.0.0"
+PINS_FILE="${REPOS_PINS:-$HOME/.config/repos/pins}"
+EDITOR_SCHEME="${REPOS_EDITOR:-cursor}"  # cursor, code, zed, etc.
+
+# ── Helpers ─────────────────────────────────────────────────────────
+
+ensure_pins_dir() {
+  local dir
+  dir=$(dirname "$PINS_FILE")
+  if [ ! -d "$dir" ]; then
+    mkdir -p "$dir"
+  fi
+}
+
+resolve_path() {
+  cd "$1" 2>/dev/null && pwd
+}
+
+repo_name() {
+  basename "$1"
+}
+
+# OSC 8 clickable link: opens repo in editor when clicked
+# Works in iTerm2, Warp, Ghostty, WezTerm, Windows Terminal, etc.
+repo_link() {
+  local dir="$1"
+  local name
+  name=$(repo_name "$dir")
+  local url="${EDITOR_SCHEME}://file${dir}"
+  # OSC 8: \e]8;;URL\a  VISIBLE_TEXT  \e]8;;\a
+  # Using \a (BEL) as terminator - more portable than ST (\e\\)
+  printf '\033]8;;%s\a%s ↗\033]8;;\a' "$url" "$name"
+}
+
+is_git_repo() {
+  git -C "$1" rev-parse --git-dir &>/dev/null
+}
+
+# ── Commands ────────────────────────────────────────────────────────
+
+cmd_pin() {
+  ensure_pins_dir
+  local dir
+  dir=$(resolve_path "${1:-.}")
+
+  if [ -z "$dir" ]; then
+    echo "Directory not found: ${1:-.}" >&2
+    return 1
+  fi
+
+  if ! is_git_repo "$dir"; then
+    echo "Not a git repository: $dir" >&2
+    return 1
+  fi
+
+  if [ -f "$PINS_FILE" ] && grep -qx "$dir" "$PINS_FILE"; then
+    echo "Already pinned: $dir"
+    return 0
+  fi
+
+  echo "$dir" >> "$PINS_FILE"
+  echo "Pinned: $(repo_name "$dir") ($dir)"
+}
+
+cmd_unpin() {
+  local dir
+  dir=$(resolve_path "${1:-.}")
+
+  if [ -z "$dir" ]; then
+    echo "Directory not found: ${1:-.}" >&2
+    return 1
+  fi
+
+  if [ ! -f "$PINS_FILE" ]; then
+    echo "No pinned repos" >&2
+    return 1
+  fi
+
+  if ! grep -qx "$dir" "$PINS_FILE"; then
+    echo "Not pinned: $dir" >&2
+    return 1
+  fi
+
+  local escaped
+  escaped=$(printf '%s\n' "$dir" | sed 's/[\/&]/\\&/g')
+  if sed --version 2>/dev/null | grep -q GNU; then
+    sed -i "/^${escaped}$/d" "$PINS_FILE"
+  else
+    sed -i '' "/^${escaped}$/d" "$PINS_FILE"
+  fi
+  echo "Unpinned: $(repo_name "$dir")"
+}
+
+cmd_status() {
+  if [ ! -f "$PINS_FILE" ] || [ ! -s "$PINS_FILE" ]; then
+    echo "No pinned repos. Use 'repos pin [path]' to add one."
+    return 0
+  fi
+
+  printf "\n"
+  printf "  \033[1m%-30s %-40s %-10s %s\033[0m\n" "REPO" "BRANCH" "DIRTY" "PUSH"
+  printf "  %-30s %-40s %-10s %s\n" "------------------------------" "----------------------------------------" "----------" "--------------------"
+
+  while IFS= read -r dir; do
+    [ -z "$dir" ] && continue
+
+    if [ ! -d "$dir" ]; then
+      printf "  %-28s \033[31m%s\033[0m\n" "$(repo_name "$dir")" "directory not found"
+      continue
+    fi
+
+    if ! is_git_repo "$dir"; then
+      printf "  %-28s \033[31m%s\033[0m\n" "$(repo_name "$dir")" "not a git repo"
+      continue
+    fi
+
+    # Branch
+    local branch
+    branch=$(git -C "$dir" branch --show-current 2>/dev/null || echo "")
+    if [ -z "$branch" ]; then
+      local short_sha
+      short_sha=$(git -C "$dir" rev-parse --short HEAD 2>/dev/null || echo "???")
+      branch="detached@$short_sha"
+    fi
+
+    # Dirty status (staged + unstaged + untracked)
+    local staged unstaged untracked dirty_parts=""
+    staged=$(git -C "$dir" diff --cached --numstat 2>/dev/null | wc -l | tr -d ' ')
+    unstaged=$(git -C "$dir" diff --numstat 2>/dev/null | wc -l | tr -d ' ')
+    untracked=$(git -C "$dir" ls-files --others --exclude-standard 2>/dev/null | wc -l | tr -d ' ')
+
+    if [ "$staged" -gt 0 ]; then
+      dirty_parts="${dirty_parts}${staged} staged "
+    fi
+    if [ "$unstaged" -gt 0 ]; then
+      dirty_parts="${dirty_parts}${unstaged} modified "
+    fi
+    if [ "$untracked" -gt 0 ]; then
+      dirty_parts="${dirty_parts}${untracked} untracked "
+    fi
+
+    local dirty_display
+    if [ -z "$dirty_parts" ]; then
+      dirty_display="\033[32m✓ clean\033[0m"
+    else
+      dirty_display="\033[33m● ${dirty_parts}\033[0m"
+    fi
+
+    # Push status (commits ahead of remote)
+    local push_display=""
+    local upstream
+    upstream=$(git -C "$dir" rev-parse --abbrev-ref '@{upstream}' 2>/dev/null || echo "")
+
+    if [ -n "$upstream" ]; then
+      local ahead behind
+      ahead=$(git -C "$dir" rev-list --count "$upstream..HEAD" 2>/dev/null || echo "0")
+      behind=$(git -C "$dir" rev-list --count "HEAD..$upstream" 2>/dev/null || echo "0")
+
+      local parts=""
+      if [ "$ahead" -gt 0 ]; then
+        parts="${parts}\033[36m↑ ${ahead} to push\033[0m "
+      fi
+      if [ "$behind" -gt 0 ]; then
+        parts="${parts}\033[33m↓ ${behind} to pull\033[0m "
+      fi
+      if [ -z "$parts" ]; then
+        push_display="\033[32m✓ synced\033[0m"
+      else
+        push_display="$parts"
+      fi
+    else
+      push_display="\033[90mno upstream\033[0m"
+    fi
+
+    local name_plain
+    name_plain="$(repo_name "$dir") ↗"
+    local col_width=30
+    local pad=$((col_width - ${#name_plain}))
+    if [ "$pad" -lt 1 ]; then pad=1; fi
+    # Print link with manual padding (escape sequences have zero visible width)
+    printf '  '
+    repo_link "$dir"
+    printf '%*s' "$pad" ""
+    printf '%-40s %-20b %b\n' "$branch" "$dirty_display" "$push_display"
+  done < "$PINS_FILE"
+
+  printf "\n"
+}
+
+cmd_list() {
+  if [ ! -f "$PINS_FILE" ] || [ ! -s "$PINS_FILE" ]; then
+    echo "No pinned repos."
+    return 0
+  fi
+  cat "$PINS_FILE"
+}
+
+cmd_live() {
+  local interval="${1:-3}"
+  local prev_lines=0
+
+  trap 'printf "\033[?1049l"; tput cnorm; exit 0' INT TERM
+  tput civis  # hide cursor
+  printf '\033[?1049h'  # switch to alternate screen buffer
+
+  while true; do
+    local output
+    output=$(printf "  \033[90m● live  refreshing every %ss  (Ctrl+C to exit)\033[0m\n" "$interval"; cmd_status)
+
+    # Move cursor to top-left and overwrite
+    tput home
+    printf '%s' "$output"
+
+    # Count lines in new output and clear any leftover lines from previous render
+    local new_lines
+    new_lines=$(printf '%s\n' "$output" | wc -l | tr -d ' ')
+    local i=$new_lines
+    while [ "$i" -lt "$prev_lines" ]; do
+      tput el  # clear to end of line
+      printf '\n'
+      i=$((i + 1))
+    done
+    prev_lines=$new_lines
+
+    sleep "$interval"
+  done
+}
+
+# ── Main ────────────────────────────────────────────────────────────
+
+case "${1:-status}" in
+  pin)       cmd_pin "${2:-}" ;;
+  unpin|rm)  cmd_unpin "${2:-}" ;;
+  status|s)  cmd_status ;;
+  live|watch) cmd_live "${2:-3}" ;;
+  list|ls)   cmd_list ;;
+  -v|--version|version)
+    echo "repos $VERSION"
+    ;;
+  -h|--help|help)
+    cat <<'HELP'
+repos - pinned repository status dashboard
+
+Usage:
+  repos                 show status of all pinned repos
+  repos pin [path]      pin a repo (defaults to current directory)
+  repos unpin [path]    unpin a repo
+  repos live [seconds]  live-updating dashboard (default: 3s)
+  repos list            list pinned repo paths
+  repos version         show version
+  repos help            show this help
+
+Config:
+  Pins are stored at ~/.config/repos/pins by default.
+  Override with REPOS_PINS environment variable.
+
+  Repo names are clickable and open in your editor.
+  Default: cursor. Override with REPOS_EDITOR:
+    export REPOS_EDITOR=code      # VS Code
+    export REPOS_EDITOR=cursor    # Cursor
+    export REPOS_EDITOR=zed       # Zed
+
+Dependencies:
+  - git (required)
+HELP
+    ;;
+  *)
+    echo "Unknown command: $1 (try 'repos help')" >&2
+    exit 1
+    ;;
+esac
