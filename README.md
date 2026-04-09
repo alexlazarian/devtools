@@ -11,14 +11,58 @@ A small collection of git workflow tools.
 
 ## Parallel workflow
 
-These tools are designed to work together for parallel feature development with Claude Code:
+These tools are designed to work together for parallel feature development with Claude Code.
 
-1. Paste a [prompt template](prompts/) into a new Claude Code session to spin up a worktree
-2. Repeat for as many features as you want running in parallel
-3. `brk live` to watch branch status across all features in real time
-4. `gsw feature-x` to preview any branch in your main checkout (hot reload picks it up)
-5. `brk sync` to keep everything up to date with main
-6. `repos live` for a bird's-eye view across all your repos
+### 1. Spin up worktrees for each feature
+
+```bash
+git worktree add .worktrees/feature-a feature-a
+git worktree add .worktrees/feature-b feature-b
+git worktree add .worktrees/feature-c feature-c
+```
+
+Or paste a [prompt template](prompts/) into Claude Code and it handles the worktree setup for you.
+
+### 2. Launch a Claude Code session in each worktree
+
+Open separate terminals:
+
+```bash
+cd .worktrees/feature-a && claude
+cd .worktrees/feature-b && claude
+cd .worktrees/feature-c && claude
+```
+
+Each session works in total isolation. No conflicts.
+
+### 3. Your main checkout is the preview window
+
+Keep your dev servers running in the main checkout. When you want to see what an agent built:
+
+```bash
+gsw feature-a    # hot reload fires, you see feature A
+gsw feature-b    # swap to B instantly
+```
+
+### 4. Track everything with brk and repos
+
+```bash
+brk              # which branches are behind main? any PRs?
+brk live         # real-time branch dashboard
+brk sync         # sync them all before merging
+repos            # overview across all your repos
+repos live       # real-time repo dashboard
+```
+
+### 5. The cycle
+
+- Agent finishes a chunk of work in its worktree
+- `gsw feature-x` to preview it with hot reload
+- Give feedback in that agent's terminal
+- `gsw feature-y` to check on another one
+- When ready: `brk sync` to stay current with main, raise PRs
+
+The key insight: worktrees are for isolation (agents don't step on each other), your main checkout is for previewing (one dev server, switch with `gsw`), and `brk` keeps you aware of where everything stands.
 
 ## Install
 
